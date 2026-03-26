@@ -31,15 +31,9 @@ const ZSBTC = "SP2VCQJGH7PHP2DJK7Z0V48AGBHQAW3R3ZW1QF4N.zsbtc-v2-0";
 const SBTC_TOKEN = "SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token";
 const WSTX = "SP2VCQJGH7PHP2DJK7Z0V48AGBHQAW3R3ZW1QF4N.wstx";
 
-// Pyth oracle (required by Zest for price feeds)
-const PYTH_STORE = "SP2T5JKWWP3FYYX4YRK8GK5BG2YCNGEAEY2P2PKN0.pyth-store-v1";
-const PYTH_DECODER = "SP2T5JKWWP3FYYX4YRK8GK5BG2YCNGEAEY2P2PKN0.pyth-pnau-decoder-v1";
-const PYTH_ORACLE = "SP2T5JKWWP3FYYX4YRK8GK5BG2YCNGEAEY2P2PKN0.pyth-oracle-v3";
-
 // Safety defaults
 const DEFAULT_MAX_SUPPLY_SATS = 500_000;
 const MIN_GAS_USTX = 100_000;
-const SBTC_DECIMALS = 8;
 
 // ── Types ──────────────────────────────────────────────────────────────
 
@@ -77,7 +71,6 @@ async function getStxBalance(address: string): Promise<number> {
 }
 
 async function getSbtcBalance(address: string): Promise<number> {
-  const { address: contractAddr, name: contractName } = splitContractId(SBTC_TOKEN);
   const res = await fetch(
     `${HIRO_API}/extended/v1/address/${address}/balances`
   );
