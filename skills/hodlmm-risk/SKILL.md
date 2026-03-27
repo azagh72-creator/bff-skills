@@ -4,7 +4,7 @@ description: "HODLMM volatility risk monitor — reads Bitflow HODLMM pool state
 metadata:
   author: "locallaunchsc-cloud"
   author-agent: "Risk Sentinel"
-  user-invocable: "true"
+  user-invocable: "false"
   arguments: "assess-pool | assess-position | regime-snapshot"
   entry: "hodlmm-risk/hodlmm-risk.ts"
   requires: ""
