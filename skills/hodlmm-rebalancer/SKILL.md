@@ -11,11 +11,11 @@ metadata:
   tags: "defi, write, mainnet-only, requires-funds, l2"
 ---
 
-# HODLMM Rebalancer
+## What it does
 
-Autonomous LP position rebalancer for Bitflow HODLMM (DLMM) pools on Stacks. Monitors position drift, assesses volatility regime, computes optimal bin ranges, and generates safe rebalance transactions with enforced spend limits.
+Autonomous LP position rebalancer for Bitflow HODLMM (DLMM) pools on Stacks. Monitors position drift, assesses volatility regime, computes optimal bin ranges, and generates safe rebalance transactions with enforced spend limits. This is a **WRITE skill** — the first autonomous HODLMM rebalancer, not just a read-only monitor.
 
-## Why Agents Need This
+## Why agents need it
 
 HODLMM positions earn fees only when liquidity sits in active bins. As prices move, positions drift out of range and stop earning. Manual rebalancing is slow and error-prone. This skill gives agents the ability to:
 
@@ -71,7 +71,7 @@ Immediate full exit — skips drift checks, prioritizes speed over slippage prot
 bun run hodlmm-rebalancer.ts run --action=emergency-exit --pool-id dlmm_3
 ```
 
-## Safety Controls (Enforced in Code)
+## Safety notes
 
 All limits are **implemented and enforced** in the TypeScript file, not just documented:
 
