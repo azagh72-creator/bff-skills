@@ -85,7 +85,7 @@ All limits are **implemented and enforced** in the TypeScript file, not just doc
 | Cooldown | 300 seconds between ops | Tracked per-session |
 | Absolute hard cap | 1,000,000 sats (0.01 BTC) | Cannot be overridden by any flag |
 
-## Output Contract
+## Output contract
 
 All commands output structured JSON:
 
