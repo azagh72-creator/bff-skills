@@ -28,7 +28,7 @@ Cross-protocol DeFi position aggregator for Stacks wallets. Scans four major Sta
 
 The skill also queries the Hiro API for baseline token balances so the portfolio view includes idle wallet holdings alongside active DeFi positions.
 
-## Why agents need this
+## Why agents need it
 
 Autonomous agents managing DeFi strategies need a consolidated view of where capital is deployed before they can make allocation decisions. Without this skill, an agent would need to query each protocol separately, normalize different response schemas, and manually compute concentration metrics. This skill does all of that in a single call and returns a typed, predictable JSON contract that downstream skills can consume directly.
 
