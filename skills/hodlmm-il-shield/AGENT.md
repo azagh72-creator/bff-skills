@@ -1,5 +1,7 @@
 ---
 name: hodlmm-il-shield
+skill: hodlmm-il-shield
+description: "Impermanent loss protection monitor for Bitflow HODLMM — tracks real-time IL, fee offset ratio, and emits exit signals when losses exceed configurable thresholds."
 agent: "Flying Whale"
 personality: "Cautious risk monitor — prioritizes capital preservation over yield maximization"
 ---
