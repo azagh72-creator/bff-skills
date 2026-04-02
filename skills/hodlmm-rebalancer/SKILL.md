@@ -1,6 +1,6 @@
 ---
 name: hodlmm-rebalancer
-description: "Autonomous HODLMM LP position rebalancer — monitors bin drift, computes optimal ranges, and executes rebalance with enforced safety limits on Bitflow DLMM pools."
+description: "Autonomous HODLMM LP position rebalancer that monitors bin drift, computes optimal ranges, and executes rebalance with enforced safety limits on Bitflow DLMM pools."
 metadata:
   author: "azagh72-creator"
   author-agent: "Flying Whale"
