@@ -1,6 +1,7 @@
 #!/usr/bin/env bun
 
 import { Command } from "commander";
+import { principalCV, serializeCV, deserializeCV, cvToJSON, ClarityType } from "@stacks/transactions";
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
@@ -222,19 +223,55 @@ async function checkEndpoint(
   }
 }
 
+// ─── Price Helpers ──────────────────────────────────────────────────────────
+
+const COINGECKO_SIMPLE = "https://api.coingecko.com/api/v3/simple/price";
+
+async function getUsdPrices(): Promise<{ stx: number; btc: number }> {
+  try {
+    const resp = await fetchWithTimeout(
+      `${COINGECKO_SIMPLE}?ids=blockstack,bitcoin&vs_currencies=usd`,
+      {},
+      5_000
+    );
+    if (!resp.ok) return { stx: 0, btc: 0 };
+    const data = await resp.json();
+    return {
+      stx: data?.blockstack?.usd ?? 0,
+      btc: data?.bitcoin?.usd ?? 0,
+    };
+  } catch {
+    return { stx: 0, btc: 0 };
+  }
+}
+
+async function estimateWalletUsd(balances: TokenBalance[]): Promise<number> {
+  const prices = await getUsdPrices();
+  let total = 0;
+  for (const b of balances) {
+    const amount = parseInt(b.balance) / Math.pow(10, b.decimals);
+    if (b.token === "STX") {
+      total += amount * prices.stx;
+    } else if (b.token.toLowerCase().includes("sbtc")) {
+      total += amount * prices.btc;
+    }
+    // Other tokens: skip pricing (no reliable oracle)
+  }
+  return Math.round(total * 100) / 100;
+}
+
 // ─── Protocol Scanners ───────────────────────────────────────────────────────
 
 async function scanWalletBalances(
-  address: string
+  address: string,
+  cachedHiroData?: any
 ): Promise<TokenBalance[]> {
   try {
-    const resp = await fetchWithTimeout(
-      ENDPOINTS.hiroBalances(address),
-      {},
-      HIRO_TIMEOUT
-    );
-    if (!resp.ok) return [];
-    const data = await resp.json();
+    const data = cachedHiroData ?? await (async () => {
+      const resp = await fetchWithTimeout(ENDPOINTS.hiroBalances(address), {}, HIRO_TIMEOUT);
+      return resp.ok ? resp.json() : null;
+    })();
+    if (!data) return [];
 
     const balances: TokenBalance[] = [];
 
@@ -266,7 +303,8 @@ async function scanWalletBalances(
 }
 
 async function scanBitflow(
-  address: string
+  address: string,
+  cachedHiroData?: any
 ): Promise<ProtocolResult<BitflowPosition>> {
   try {
     const resp = await fetchWithTimeout(ENDPOINTS.bitflowPools);
@@ -281,42 +319,55 @@ async function scanBitflow(
     const pools = await resp.json();
     const positions: BitflowPosition[] = [];
 
-    // Parse pools and check for user positions
+    // Parse pool metadata (the /pools endpoint does NOT return per-user data)
     const poolList = Array.isArray(pools) ? pools : pools?.results ?? [];
+    const poolMap = new Map<string, any>();
     for (const pool of poolList) {
       const poolId = pool.id ?? pool.pool_id ?? pool.name ?? "unknown";
-      const tokenA = pool.token_a_symbol ?? pool.tokenASymbol ?? pool.token0 ?? "?";
-      const tokenB = pool.token_b_symbol ?? pool.tokenBSymbol ?? pool.token1 ?? "?";
+      poolMap.set(poolId, pool);
+    }
 
-      // Check if pool has user-specific data or if we can derive from
-      // on-chain state. For HODLMM pools, positions are on-chain.
-      if (pool.user_shares || pool.userBalance) {
-        const shares = String(pool.user_shares ?? pool.userBalance ?? "0");
-        if (shares !== "0") {
-          positions.push({
-            pool: poolId,
-            tokenA,
-            tokenB,
-            shares,
-            estimatedUsd: parseFloat(pool.user_value_usd ?? "0"),
-          });
+    // Query user positions via HODLMM bins endpoint for each pool
+    for (const [poolId, pool] of poolMap) {
+      try {
+        const binsResp = await fetchWithTimeout(
+          `https://bff.bitflowapis.finance/api/app/v1/users/${address}/positions/${poolId}/bins`,
+          {},
+          8_000
+        );
+        if (binsResp.ok) {
+          const binsData = await binsResp.json();
+          const bins = Array.isArray(binsData) ? binsData : binsData?.bins ?? [];
+          if (bins.length > 0) {
+            const tokenA = pool.token_a_symbol ?? pool.tokenASymbol ?? pool.token0 ?? "?";
+            const tokenB = pool.token_b_symbol ?? pool.tokenBSymbol ?? pool.token1 ?? "?";
+            const totalShares = bins.reduce((s: number, b: any) => s + parseFloat(b.shares ?? b.liquidity ?? "0"), 0);
+            const estimatedUsd = bins.reduce((s: number, b: any) => s + parseFloat(b.value_usd ?? "0"), 0);
+            if (totalShares > 0) {
+              positions.push({
+                pool: poolId,
+                tokenA,
+                tokenB,
+                shares: String(totalShares),
+                estimatedUsd,
+              });
+            }
+          }
         }
+      } catch {
+        // Non-critical — skip this pool
       }
     }
 
-    // Attempt on-chain position read via Hiro for HODLMM pools
-    // This is a best-effort secondary check
+    // Fallback: check Hiro for Bitflow LP tokens not caught above
     try {
-      const hiroResp = await fetchWithTimeout(
-        ENDPOINTS.hiroBalances(address),
-        {},
-        HIRO_TIMEOUT
-      );
-      if (hiroResp.ok) {
-        const hiroData = await hiroResp.json();
-        const fungibleTokens = hiroData.fungible_tokens ?? {};
+      const hiroFallback = cachedHiroData ?? await (async () => {
+        const r = await fetchWithTimeout(ENDPOINTS.hiroBalances(address), {}, HIRO_TIMEOUT);
+        return r.ok ? r.json() : null;
+      })();
+      if (hiroFallback) {
+        const fungibleTokens = hiroFallback.fungible_tokens ?? {};
         for (const [tokenId, info] of Object.entries<any>(fungibleTokens)) {
-          // Bitflow LP tokens typically contain "bitflow" or "hodlmm" in contract
           const lowerTokenId = tokenId.toLowerCase();
           if (
             (lowerTokenId.includes("bitflow") || lowerTokenId.includes("hodlmm")) &&
@@ -331,14 +382,14 @@ async function scanBitflow(
                 tokenA: "?",
                 tokenB: "?",
                 shares: info.balance,
-                estimatedUsd: 0, // Cannot estimate without price data from pool
+                estimatedUsd: 0,
               });
             }
           }
         }
       }
     } catch {
-      // Non-critical — continue with whatever positions we have
+      // Non-critical
     }
 
     const totalUsd = positions.reduce((sum, p) => sum + p.estimatedUsd, 0);
@@ -354,19 +405,19 @@ async function scanBitflow(
 }
 
 async function scanZest(
-  address: string
+  address: string,
+  cachedHiroData?: any
 ): Promise<ProtocolResult<ZestPosition>> {
   try {
     const { address: contractAddr, name: contractName, function: fn } =
       ENDPOINTS.zestContract;
 
     // Encode the address as a Clarity principal for the read-only call
+    // Use @stacks/transactions to properly encode the c32check address
+    const serializedPrincipal = Buffer.from(serializeCV(principalCV(address))).toString("hex");
     const body = JSON.stringify({
       sender: address,
-      arguments: [
-        // Clarity principal argument: 0x06 prefix + standard principal encoding
-        `0x0616${Buffer.from(address).toString("hex")}`,
-      ],
+      arguments: [`0x${serializedPrincipal}`],
     });
 
     const resp = await fetchWithTimeout(
@@ -396,10 +447,8 @@ async function scanZest(
 
     const positions: ZestPosition[] = [];
 
-    // Parse Clarity response — the structure depends on Zest contract version
+    // Parse Clarity response using @stacks/transactions decoder
     if (data.okay && data.result) {
-      // Attempt to extract supply/borrow data from Clarity tuple
-      // This is a simplified parser — production would use a full Clarity decoder
       const resultHex = data.result;
 
       // If result indicates no data (none type), return empty
@@ -407,26 +456,61 @@ async function scanZest(
         return { status: "ok", positions: [], estimatedUsd: 0 };
       }
 
-      // For non-none results, create a placeholder position indicating active Zest usage
-      positions.push({
-        type: "supply",
-        asset: "STX",
-        principal: "0",
-        ltv: null,
-        estimatedUsd: 0,
-      });
+      // Decode Clarity value to JSON for inspection
+      try {
+        const cv = deserializeCV(resultHex);
+        const parsed = cvToJSON(cv);
+
+        // Extract supply and borrow amounts from Zest user-data tuple
+        if (parsed?.value) {
+          const val = parsed.value;
+          const supplyAmount = val?.["supply-balance"]?.value ?? val?.["total-supply"]?.value ?? "0";
+          const borrowAmount = val?.["borrow-balance"]?.value ?? val?.["total-borrow"]?.value ?? "0";
+
+          if (supplyAmount !== "0" && supplyAmount !== 0) {
+            const supplyNum = parseInt(String(supplyAmount)) / 1e6;
+            positions.push({
+              type: "supply",
+              asset: "STX",
+              principal: String(supplyAmount),
+              ltv: null,
+              estimatedUsd: 0, // Will be estimated via receipt token fallback below
+            });
+          }
+
+          if (borrowAmount !== "0" && borrowAmount !== 0) {
+            const borrowNum = parseInt(String(borrowAmount)) / 1e6;
+            const supplyNum = parseInt(String(supplyAmount)) / 1e6;
+            const ltv = supplyNum > 0 ? borrowNum / supplyNum : null;
+            positions.push({
+              type: "borrow",
+              asset: "STX",
+              principal: String(borrowAmount),
+              ltv,
+              estimatedUsd: 0,
+            });
+          }
+        }
+      } catch {
+        // Clarity decode failed — create placeholder indicating active usage
+        positions.push({
+          type: "supply",
+          asset: "STX",
+          principal: "0",
+          ltv: null,
+          estimatedUsd: 0,
+        });
+      }
     }
 
     // Fallback: check token balances for Zest receipt tokens
     try {
-      const hiroResp = await fetchWithTimeout(
-        ENDPOINTS.hiroBalances(address),
-        {},
-        HIRO_TIMEOUT
-      );
-      if (hiroResp.ok) {
-        const hiroData = await hiroResp.json();
-        const fungibleTokens = hiroData.fungible_tokens ?? {};
+      const hiroFallback = cachedHiroData ?? await (async () => {
+        const r = await fetchWithTimeout(ENDPOINTS.hiroBalances(address), {}, HIRO_TIMEOUT);
+        return r.ok ? r.json() : null;
+      })();
+      if (hiroFallback) {
+        const fungibleTokens = hiroFallback.fungible_tokens ?? {};
         for (const [tokenId, info] of Object.entries<any>(fungibleTokens)) {
           const lowerTokenId = tokenId.toLowerCase();
           if (
@@ -463,7 +547,8 @@ async function scanZest(
 }
 
 async function scanAlex(
-  address: string
+  address: string,
+  cachedHiroData?: any
 ): Promise<ProtocolResult<AlexPosition>> {
   try {
     const resp = await fetchWithTimeout(ENDPOINTS.alexBalances(address));
@@ -499,14 +584,12 @@ async function scanAlex(
     // Fallback: check Hiro for ALEX LP tokens
     if (positions.length === 0) {
       try {
-        const hiroResp = await fetchWithTimeout(
-          ENDPOINTS.hiroBalances(address),
-          {},
-          HIRO_TIMEOUT
-        );
-        if (hiroResp.ok) {
-          const hiroData = await hiroResp.json();
-          const fungibleTokens = hiroData.fungible_tokens ?? {};
+        const hiroFallback = cachedHiroData ?? await (async () => {
+          const r = await fetchWithTimeout(ENDPOINTS.hiroBalances(address), {}, HIRO_TIMEOUT);
+          return r.ok ? r.json() : null;
+        })();
+        if (hiroFallback) {
+          const fungibleTokens = hiroFallback.fungible_tokens ?? {};
           for (const [tokenId, info] of Object.entries<any>(fungibleTokens)) {
             const lowerTokenId = tokenId.toLowerCase();
             if (
@@ -718,7 +801,7 @@ async function runDoctor(): Promise<void> {
       HIRO_TIMEOUT
     ),
     checkEndpoint("ALEX DEX", "https://api.alexlab.co/v1/allswaps", 8_000),
-    checkEndpoint("Styx Bridge", "https://api.hiro.so/v2/info", HIRO_TIMEOUT),
+    checkEndpoint("Styx Bridge", "https://app.styxfinance.com/api", 8_000),
     checkEndpoint(
       "Hiro API",
       ENDPOINTS.hiroBalances("SP000000000000000000002Q6VF78"),
@@ -741,17 +824,34 @@ async function runDoctor(): Promise<void> {
   output(envelope<DoctorResult>("doctor", { overall, endpoints: checks }));
 }
 
+async function fetchHiroBalances(address: string): Promise<any | null> {
+  try {
+    const resp = await fetchWithTimeout(
+      ENDPOINTS.hiroBalances(address),
+      {},
+      HIRO_TIMEOUT
+    );
+    if (!resp.ok) return null;
+    return await resp.json();
+  } catch {
+    return null;
+  }
+}
+
 async function runScan(address: string): Promise<ScanData> {
+  // Fetch Hiro balances ONCE and share across all scanners
+  const hiroData = await fetchHiroBalances(address);
+
   const [wallet, bitflow, zest, alex, styx] = await Promise.all([
-    scanWalletBalances(address),
-    scanBitflow(address),
-    scanZest(address),
-    scanAlex(address),
+    scanWalletBalances(address, hiroData),
+    scanBitflow(address, hiroData),
+    scanZest(address, hiroData),
+    scanAlex(address, hiroData),
     scanStyx(address),
   ]);
 
-  // Estimate wallet USD (rough: STX ~ we cannot price without oracle, set to 0)
-  const walletUsd = 0;
+  // Estimate wallet USD using CoinGecko for STX + BTC pricing
+  const walletUsd = await estimateWalletUsd(wallet);
 
   const totals = {
     walletUsd,

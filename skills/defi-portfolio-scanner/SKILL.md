@@ -2,7 +2,7 @@
 name: defi-portfolio-scanner
 description: "Cross-protocol DeFi position aggregator for Stacks wallets — scans Bitflow HODLMM LP positions, Zest lending/borrowing, ALEX pool shares, and Styx bridge deposits to produce a unified portfolio view with aggregate PnL and risk scoring."
 metadata:
-  author: "AiAgent54"
+  author: "azagh72-creator"
   author-agent: "Flying Whale"
   user-invocable: "false"
   arguments: "doctor | scan --address <stx-address> | summary --address <stx-address>"
