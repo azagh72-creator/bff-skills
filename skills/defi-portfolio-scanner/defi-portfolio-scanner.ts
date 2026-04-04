@@ -1,7 +1,7 @@
 #!/usr/bin/env bun
 
 import { Command } from "commander";
-import { principalCV, serializeCV, deserializeCV, cvToJSON, ClarityType } from "@stacks/transactions";
+import { principalCV, serializeCV, deserializeCV, cvToJSON } from "@stacks/transactions";
 
 // ─── Configuration ───────────────────────────────────────────────────────────
 
@@ -12,10 +12,12 @@ const HIRO_TIMEOUT = 15_000;
 const ENDPOINTS = {
   bitflowPools: "https://bff.bitflowapis.finance/api/app/v1/pools",
   zestContract: {
-    address: "SP2VCQJHN7SP2CZCE5XR1GDMG0RMG5ERGXBTM22Y",
-    name: "pool-borrow-v2-01",
-    function: "get-user-data",
+    address: "SP2VCQJGH7PHP2DJK7Z0V48AGBHQAW3R3ZW1QF4N",
+    name: "pool-borrow-v2-3",
+    function: "get-user-reserve-data",
   },
+  // STX asset contract for Zest get-user-reserve-data second arg
+  zestStxAsset: "SP2VCQJGH7PHP2DJK7Z0V48AGBHQAW3R3ZW1QF4N.wstx",
   alexBalances: (addr: string) =>
     `https://api.alexlab.co/v1/pool_tokens/balances/${addr}`,
   styxApi: "https://app.styxfinance.com/api",
@@ -327,35 +329,40 @@ async function scanBitflow(
       poolMap.set(poolId, pool);
     }
 
-    // Query user positions via HODLMM bins endpoint for each pool
-    for (const [poolId, pool] of poolMap) {
-      try {
-        const binsResp = await fetchWithTimeout(
+    // Query user positions via HODLMM bins endpoint — parallelized to avoid serial timeout accumulation
+    const binsResults = await Promise.allSettled(
+      [...poolMap.entries()].map(([poolId, pool]) =>
+        fetchWithTimeout(
           `https://bff.bitflowapis.finance/api/app/v1/users/${address}/positions/${poolId}/bins`,
           {},
           8_000
-        );
-        if (binsResp.ok) {
-          const binsData = await binsResp.json();
-          const bins = Array.isArray(binsData) ? binsData : binsData?.bins ?? [];
-          if (bins.length > 0) {
-            const tokenA = pool.token_a_symbol ?? pool.tokenASymbol ?? pool.token0 ?? "?";
-            const tokenB = pool.token_b_symbol ?? pool.tokenBSymbol ?? pool.token1 ?? "?";
-            const totalShares = bins.reduce((s: number, b: any) => s + parseFloat(b.shares ?? b.liquidity ?? "0"), 0);
-            const estimatedUsd = bins.reduce((s: number, b: any) => s + parseFloat(b.value_usd ?? "0"), 0);
-            if (totalShares > 0) {
-              positions.push({
-                pool: poolId,
-                tokenA,
-                tokenB,
-                shares: String(totalShares),
-                estimatedUsd,
-              });
-            }
-          }
-        }
-      } catch {
-        // Non-critical — skip this pool
+        )
+          .then(async (r) => {
+            if (!r.ok) return null;
+            const binsData = await r.json();
+            return { poolId, pool, bins: Array.isArray(binsData) ? binsData : binsData?.bins ?? [] };
+          })
+          .catch(() => null)
+      )
+    );
+
+    for (const result of binsResults) {
+      if (result.status !== "fulfilled" || !result.value) continue;
+      const { poolId, pool, bins } = result.value;
+      if (bins.length === 0) continue;
+
+      const tokenA = pool.token_a_symbol ?? pool.tokenASymbol ?? pool.token0 ?? "?";
+      const tokenB = pool.token_b_symbol ?? pool.tokenBSymbol ?? pool.token1 ?? "?";
+      const totalShares = bins.reduce((s: number, b: any) => s + parseFloat(b.shares ?? b.liquidity ?? "0"), 0);
+      const estimatedUsd = bins.reduce((s: number, b: any) => s + parseFloat(b.value_usd ?? "0"), 0);
+      if (totalShares > 0) {
+        positions.push({
+          pool: poolId,
+          tokenA,
+          tokenB,
+          shares: String(totalShares),
+          estimatedUsd,
+        });
       }
     }
 
@@ -412,12 +419,12 @@ async function scanZest(
     const { address: contractAddr, name: contractName, function: fn } =
       ENDPOINTS.zestContract;
 
-    // Encode the address as a Clarity principal for the read-only call
-    // Use @stacks/transactions to properly encode the c32check address
-    const serializedPrincipal = Buffer.from(serializeCV(principalCV(address))).toString("hex");
+    // get-user-reserve-data takes two principal args: user and asset
+    const serializedUser = Buffer.from(serializeCV(principalCV(address))).toString("hex");
+    const serializedAsset = Buffer.from(serializeCV(principalCV(ENDPOINTS.zestStxAsset))).toString("hex");
     const body = JSON.stringify({
       sender: address,
-      arguments: [`0x${serializedPrincipal}`],
+      arguments: [`0x${serializedUser}`, `0x${serializedAsset}`],
     });
 
     const resp = await fetchWithTimeout(
@@ -444,8 +451,10 @@ async function scanZest(
     }
 
     const data = await resp.json();
-
     const positions: ZestPosition[] = [];
+
+    // Fetch STX price for USD estimation
+    const prices = await getUsdPrices();
 
     // Parse Clarity response using @stacks/transactions decoder
     if (data.okay && data.result) {
@@ -461,45 +470,30 @@ async function scanZest(
         const cv = deserializeCV(resultHex);
         const parsed = cvToJSON(cv);
 
-        // Extract supply and borrow amounts from Zest user-data tuple
+        // get-user-reserve-data returns: principal-borrow-balance, use-as-collateral, etc.
         if (parsed?.value) {
           const val = parsed.value;
-          const supplyAmount = val?.["supply-balance"]?.value ?? val?.["total-supply"]?.value ?? "0";
-          const borrowAmount = val?.["borrow-balance"]?.value ?? val?.["total-borrow"]?.value ?? "0";
+          const borrowAmount = val?.["principal-borrow-balance"]?.value ?? "0";
+          const useAsCollateral = val?.["use-as-collateral"]?.value ?? false;
 
-          if (supplyAmount !== "0" && supplyAmount !== 0) {
-            const supplyNum = parseInt(String(supplyAmount)) / 1e6;
-            positions.push({
-              type: "supply",
-              asset: "STX",
-              principal: String(supplyAmount),
-              ltv: null,
-              estimatedUsd: 0, // Will be estimated via receipt token fallback below
-            });
+          // If user has collateral enabled, check receipt tokens for supply amount
+          if (useAsCollateral) {
+            // Supply positions detected via receipt tokens in Hiro fallback below
           }
 
           if (borrowAmount !== "0" && borrowAmount !== 0) {
             const borrowNum = parseInt(String(borrowAmount)) / 1e6;
-            const supplyNum = parseInt(String(supplyAmount)) / 1e6;
-            const ltv = supplyNum > 0 ? borrowNum / supplyNum : null;
             positions.push({
               type: "borrow",
               asset: "STX",
               principal: String(borrowAmount),
-              ltv,
-              estimatedUsd: 0,
+              ltv: null,
+              estimatedUsd: Math.round(borrowNum * prices.stx * 100) / 100,
             });
           }
         }
       } catch {
-        // Clarity decode failed — create placeholder indicating active usage
-        positions.push({
-          type: "supply",
-          asset: "STX",
-          principal: "0",
-          ltv: null,
-          estimatedUsd: 0,
-        });
+        // Clarity decode failed — fall through to receipt token fallback
       }
     }
 
@@ -520,12 +514,13 @@ async function scanZest(
           ) {
             const shortName = tokenId.split("::").pop() ?? tokenId;
             const isDebt = lowerTokenId.includes("debt") || lowerTokenId.includes("borrow");
+            const tokenAmount = parseInt(info.balance) / 1e6;
             positions.push({
               type: isDebt ? "borrow" : "supply",
               asset: shortName,
               principal: info.balance,
               ltv: null,
-              estimatedUsd: 0,
+              estimatedUsd: Math.round(tokenAmount * prices.stx * 100) / 100,
             });
           }
         }

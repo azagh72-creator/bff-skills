@@ -1,6 +1,6 @@
 ---
 name: defi-portfolio-scanner
-description: "Cross-protocol DeFi position aggregator for Stacks wallets — scans Bitflow HODLMM LP positions, Zest lending/borrowing, ALEX pool shares, and Styx bridge deposits to produce a unified portfolio view with aggregate PnL and risk scoring."
+description: "Cross-protocol DeFi position aggregator for Stacks wallets — 5 parallel scanners covering Bitflow HODLMM LP bins, Zest lending/borrowing (V2 pool-borrow-v2-3), ALEX pool shares, Styx bridge deposits, and Hiro wallet balances. Produces a unified portfolio view with USD estimation (CoinGecko) and risk scoring."
 metadata:
   author: "azagh72-creator"
   author-agent: "Flying Whale"
@@ -124,10 +124,24 @@ On error:
 | Source | Endpoint | Purpose |
 |---|---|---|
 | Bitflow API | `https://bff.bitflowapis.finance/api/app/v1/pools` | HODLMM pool list and position data |
-| Zest Protocol | Hiro `call-read` on `SP2VCQJHN7SP2CZCE5XR1GDMG0RMG5ERGXBTM22Y.pool-borrow-v2-01` | Lending/borrowing user data |
+| Zest Protocol | Hiro `call-read` on `SP2VCQJGH7PHP2DJK7Z0V48AGBHQAW3R3ZW1QF4N.pool-borrow-v2-3` | Lending/borrowing user data via `get-user-reserve-data` |
 | ALEX DEX | `https://api.alexlab.co/v1/pool_tokens/balances/<address>` | Pool token balances |
 | Styx Bridge | `https://app.styxfinance.com/api` | Bridge deposit records |
 | Hiro API | `https://api.hiro.so/extended/v1/address/<addr>/balances` | Token balances, contract reads |
+
+## Cross-protocol DeFi portfolio scanners
+
+This skill aggregates positions from the following protocol-specific scanners:
+
+| # | Protocol | Scanner | What it detects |
+|---|---|---|---|
+| 1 | **Bitflow HODLMM** | `scanBitflow()` | LP bin positions across all active HODLMM pools via `/users/{addr}/positions/{pool}/bins`, with Hiro fallback for LP receipt tokens |
+| 2 | **Zest Protocol** | `scanZest()` | Supply collateral and borrow balances via Hiro `call-read` on `pool-borrow-v2-3.get-user-reserve-data`, plus Zest receipt token detection from Hiro balances |
+| 3 | **ALEX DEX** | `scanAlex()` | Pool token balances from ALEX `/pool_tokens/balances` API, with Hiro fallback for ALEX LP tokens in wallet |
+| 4 | **Styx Bridge** | `scanStyx()` | Pending and completed BTC→sBTC bridge deposits from Styx `/deposits` API |
+| 5 | **Wallet base** | `scanWalletBalances()` | STX, sBTC, and all fungible token balances from Hiro API — provides the idle-capital baseline |
+
+All five scanners run in parallel via `Promise.all`. Each returns a typed `ProtocolResult<T>` with `status`, `positions`, and `estimatedUsd`. USD estimation uses CoinGecko STX and BTC spot prices.
 
 ## Known constraints
 
