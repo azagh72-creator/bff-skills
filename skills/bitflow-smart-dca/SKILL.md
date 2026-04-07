@@ -47,15 +47,17 @@ bun run bitflow-smart-dca/bitflow-smart-dca.ts status --token-in STX --token-out
 ```
 
 ### run
-Executes the DCA swap on Bitflow mainnet.
+Executes the DCA swap on Bitflow mainnet. **Requires `--confirm` to authorize on-chain execution.**
 ```bash
-bun run bitflow-smart-dca/bitflow-smart-dca.ts run --token-in STX --token-out ALEX --amount 1000000
+bun run bitflow-smart-dca/bitflow-smart-dca.ts run --token-in STX --token-out ALEX --amount 1000000 --confirm
 ```
 Options:
 - `--token-in <SYMBOL>` — Source token symbol (e.g. STX, WELSH, USDA)
 - `--token-out <SYMBOL>` — Target token symbol (e.g. ALEX, sBTC, stSTX)
 - `--amount <microunits>` — Amount in microunits (1 STX = 1000000)
-- `--max-slippage <pct>` — Max allowed slippage % (default: 2)
+- `--max-slippage <pct>` — Max allowed slippage % (default: 2, hard cap: 5%)
+- `--confirm` — Required safety gate: explicit authorization to broadcast on-chain
+- `--wallet-password <password>` — Wallet decryption password (prefer `AIBTC_WALLET_PASSWORD` env var)
 
 ## Output contract
 
@@ -101,7 +103,10 @@ All outputs are JSON to stdout.
 
 ## Known constraints
 
-- Requires Bitflow readonly API to be available (`https://api.hiro.so`)
+- Requires Bitflow BFF API to be available (`https://bff.bitflowapis.finance`)
 - Token symbols must be listed on Bitflow mainnet
 - Minimum swap: 1 STX (1,000,000 microSTX)
+- Slippage hard cap: 5% — values above this are rejected at code level
+- `run` command always requires `--confirm` to broadcast; without it, outputs a preview and exits
 - Transaction fees (~0.01 STX) deducted from wallet balance separately
+- Mainnet proof TX: `cb31d7da62df052e56b32a4ca2a86290f8a64b7ae3e62c2fbef77c50f0bd42a7`
