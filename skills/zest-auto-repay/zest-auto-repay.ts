@@ -33,39 +33,21 @@ const FETCH_TIMEOUT = 15_000;
 const SPEND_FILE = join(homedir(), ".zest-auto-repay-spend.json");
 
 // ═══════════════════════════════════════════════════════════════════════════
-// ZEST V2 CONTRACT ADDRESSES
+// ZEST V2 CONTRACT ADDRESSES (deployer: SP1A27KFY4XERQCCRCARCYD1CC5N7M6688BSYADJ7)
 // ═══════════════════════════════════════════════════════════════════════════
-const ZEST_CONTRACTS: Record<string, { reserve: string; token: string; decimals: number }> = {
-  sBTC: {
-    reserve: "SP2VCQJHN7SP2CZCE5XR1GDMG0RMG5ERGXBTM22Y.reserve-vault-sbtc",
-    token: "SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token",
-    decimals: 8,
-  },
-  wSTX: {
-    reserve: "SP2VCQJHN7SP2CZCE5XR1GDMG0RMG5ERGXBTM22Y.reserve-vault-wstx",
-    token: "SP1A27KFY4XERQCCRCARCYD1CC5N7M6688BSYADJ7.wstx",
-    decimals: 6,
-  },
-  stSTX: {
-    reserve: "SP2VCQJHN7SP2CZCE5XR1GDMG0RMG5ERGXBTM22Y.reserve-vault-ststx",
-    token: "SP4SZE494VC2YC5JYG7AYFQ44F5Q4PYV7DVMDPBG.ststx-token",
-    decimals: 6,
-  },
-  USDC: {
-    reserve: "SP2VCQJHN7SP2CZCE5XR1GDMG0RMG5ERGXBTM22Y.reserve-vault-usdc",
-    token: "SP120SBRBQJ00MCWS7TM5R8WJNTTKD5K0HFRC2CNE.usdcx",
-    decimals: 6,
-  },
-  USDH: {
-    reserve: "SP2VCQJHN7SP2CZCE5XR1GDMG0RMG5ERGXBTM22Y.reserve-vault-usdh",
-    token: "SPN5AKG35QZSK2M8GAMR4AFX45659RJHDW353HSG.usdh-token-v1",
-    decimals: 8,
-  },
-  stSTXbtc: {
-    reserve: "SP2VCQJHN7SP2CZCE5XR1GDMG0RMG5ERGXBTM22Y.reserve-vault-ststxbtc",
-    token: "SP4SZE494VC2YC5JYG7AYFQ44F5Q4PYV7DVMDPBG.ststxbtc-token-v2",
-    decimals: 6,
-  },
+const ZEST_DEPLOYER = "SP1A27KFY4XERQCCRCARCYD1CC5N7M6688BSYADJ7";
+// v0-1-data.get-user-position(principal) → (ok {collateral: list, debt: list, health-factor: uint})
+// debt list entries: {asset-id: uint, actual-debt: uint, ...}
+// collateral list entries: {aid: uint (zTokenId = assetId+1), amount: uint}
+const ZEST_DATA = `${ZEST_DEPLOYER}.v0-1-data`;
+
+const ZEST_CONTRACTS: Record<string, { token: string; decimals: number; assetId: number; liquidationLtv: number }> = {
+  sBTC:     { token: "SM3VDXK3WZZSA84XXFKAFAF15NNZX32CTSG82JFQ4.sbtc-token",            decimals: 8, assetId: 2,  liquidationLtv: 85 },
+  wSTX:     { token: `${ZEST_DEPLOYER}.wstx`,                                              decimals: 6, assetId: 0,  liquidationLtv: 80 },
+  stSTX:    { token: "SP4SZE494VC2YC5JYG7AYFQ44F5Q4PYV7DVMDPBG.ststx-token",            decimals: 6, assetId: 4,  liquidationLtv: 80 },
+  USDC:     { token: "SP3Y2ZSH8P7D50B0VBTSX11S7XSG24M1VB9YFQA4K.token-aeusdc",          decimals: 6, assetId: 6,  liquidationLtv: 85 },
+  USDH:     { token: "SPN5AKG35QZSK2M8GAMR4AFX45659RJHDW353HSG.usdh-token-v1",          decimals: 8, assetId: 8,  liquidationLtv: 85 },
+  stSTXbtc: { token: "SP4SZE494VC2YC5JYG7AYFQ44F5Q4PYV7DVMDPBG.ststxbtc-token-v2",     decimals: 6, assetId: 10, liquidationLtv: 80 },
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -148,21 +130,48 @@ function fail(action: string, error: { code: string; message: string; next: stri
 
 const ZEST_ASSETS = ["sBTC", "wSTX", "stSTX", "USDC", "USDH", "stSTXbtc"];
 
+// ─── Clarity principal encoding (fix: was using string-ascii 0x0d, must be 0x05) ───
+
+const C32_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+
+/** Decode c32check-encoded Stacks address body → raw bytes [checksum(4) | hash160(20)] */
+function c32decode(input: string): Buffer {
+  const s = input.toUpperCase();
+  let bits = 0, value = 0;
+  const output: number[] = [];
+  for (const char of s) {
+    const idx = C32_ALPHABET.indexOf(char);
+    if (idx < 0) continue;
+    value = (value << 5) | idx;
+    bits += 5;
+    if (bits >= 8) {
+      bits -= 8;
+      output.push((value >> bits) & 0xff);
+    }
+  }
+  return Buffer.from(output);
+}
+
 /**
- * Encode a Stacks principal as a Clarity buffer hex string for read-only calls.
- * Format: 0x05 (standard) + 1-byte version + 20-byte hash160
+ * Encode a Stacks address as a Clarity principal hex argument.
+ * Clarity StandardPrincipal: 0x05 + version byte (1) + hash160 (20) = 22 bytes.
+ *
+ * Stacks address format: 'S' + c32_version_char + c32check(checksum[4] + hash160[20])
+ * The c32 alphabet index of the version char IS the version byte value.
+ * SP (mainnet) → 'P' = index 22 = 0x16. ST (testnet) → 'T' = index 26 = 0x1a.
  */
 function encodePrincipal(address: string): string {
-  // Use the Hiro API to let the server handle encoding by passing as argument
-  // Clarity principal type tag = 0x05, followed by version byte and hash160
-  // For simplicity, we pass the address as a string argument using Clarity string encoding
-  const bytes = Buffer.from(address, "utf8");
-  const len = bytes.length;
-  // string-ascii encoding: 0x0d + 4-byte length (big-endian) + bytes
-  const buf = Buffer.alloc(5 + len);
-  buf[0] = 0x0d;
-  buf.writeUInt32BE(len, 1);
-  bytes.copy(buf, 5);
+  if (!address.startsWith("S") || address.length < 5) {
+    throw new Error(`Invalid Stacks address: ${address}`);
+  }
+  const versionByte = C32_ALPHABET.indexOf(address[1].toUpperCase());
+  const decoded = c32decode(address.slice(2)); // 24 bytes: checksum(4) + hash160(20)
+  const hash160 = decoded.slice(4, 24);
+
+  const buf = Buffer.alloc(22);
+  buf[0] = 0x05; // Clarity StandardPrincipal type tag
+  buf[1] = versionByte;
+  hash160.copy(buf, 2);
   return "0x" + buf.toString("hex");
 }
 
@@ -196,6 +205,63 @@ function parseClarityUint(hex: string): number {
   return parseInt(lo, 16) || 0;
 }
 
+/**
+ * Extract a uint value from a Clarity hex response by field name.
+ * Scans for the field name bytes followed by a uint128 (0x01 + 16 bytes).
+ * Used to extract named fields from get-user-position tuple without a full CV parser.
+ */
+function extractUintField(hexResult: string, fieldName: string): number {
+  const hex = hexResult.replace(/^0x/, "").toLowerCase();
+  const nameBuf = Buffer.from(fieldName, "ascii");
+  // Clarity tuple field: [1-byte name length][name bytes][value bytes]
+  const lenByte = nameBuf.length.toString(16).padStart(2, "0");
+  const nameHex = nameBuf.toString("hex");
+  const pattern = lenByte + nameHex + "01"; // name + uint type tag
+  let pos = 0;
+  while (pos < hex.length) {
+    const idx = hex.indexOf(pattern, pos);
+    if (idx < 0) break;
+    const valueStart = idx + pattern.length;
+    const valueHex = hex.slice(valueStart, valueStart + 32); // 16 bytes = 32 hex chars
+    if (valueHex.length === 32) return parseInt(valueHex.slice(16), 16) || 0; // last 8 bytes fits JS number
+    pos = idx + 2;
+  }
+  return 0;
+}
+
+/**
+ * Find the actual-debt for a specific assetId in a get-user-position hex response.
+ * Locates the debt list entry where asset-id == assetId, then reads actual-debt.
+ */
+function extractDebtForAsset(hexResult: string, assetId: number): number {
+  const hex = hexResult.replace(/^0x/, "").toLowerCase();
+  // asset-id field pattern: [08]["asset-id"][01][16-byte uint = assetId]
+  const assetIdNameHex = "08" + Buffer.from("asset-id", "ascii").toString("hex");
+  const assetIdValueHex = "01" + "00".repeat(15) + assetId.toString(16).padStart(2, "0");
+  const searchFor = assetIdNameHex + assetIdValueHex;
+
+  let pos = 0;
+  while (pos < hex.length) {
+    const idx = hex.indexOf(searchFor, pos);
+    if (idx < 0) break;
+    // Found the entry for this asset — scan forward for actual-debt (within 300 chars / ~150 bytes)
+    const window = hex.slice(idx, idx + 300);
+    const debtFieldHex = "0b" + Buffer.from("actual-debt", "ascii").toString("hex") + "01";
+    const debtIdx = window.indexOf(debtFieldHex);
+    if (debtIdx >= 0) {
+      const valueStart = debtIdx + debtFieldHex.length;
+      const valueHex = window.slice(valueStart, valueStart + 32);
+      if (valueHex.length === 32) return parseInt(valueHex.slice(16), 16) || 0;
+    }
+    pos = idx + 2;
+  }
+  return 0;
+}
+
+/**
+ * Query actual collateral and debt for one asset directly from Zest v2 on-chain data.
+ * Uses v0-1-data.get-user-position (read-only, direct Hiro API call — no MCP dependency).
+ */
 async function getZestPosition(asset: string): Promise<ZestPosition | null> {
   const address = process.env.STACKS_ADDRESS;
   if (!address) return null;
@@ -204,64 +270,46 @@ async function getZestPosition(asset: string): Promise<ZestPosition | null> {
   if (!contract) return null;
 
   try {
-    // Query Zest v2 reserve vault for user's collateral and debt
-    // Try reading user supply balance from the reserve
-    const [contractAddr, contractName] = contract.reserve.split(".");
+    const [dataAddr, dataName] = ZEST_DATA.split(".");
+    const posRes = await callReadOnly(dataAddr, dataName, "get-user-position",
+      [encodePrincipal(address)], address);
 
-    // Read collateral balance via token balance (how much user has supplied)
-    const tokenParts = contract.token.split(".");
-    const balanceRes = await callReadOnly(
-      tokenParts[0], tokenParts[1], "get-balance",
-      [encodePrincipal(address)],
-      address
-    );
+    if (!posRes?.result || typeof posRes.result !== "string") return null;
 
-    let collateralRaw = 0;
-    if (balanceRes?.result) {
-      // Response is (ok uint) — extract the uint
-      const hex = balanceRes.result;
-      if (hex.startsWith("0x07")) {
-        // (ok value) — skip response wrapper, parse inner uint
-        collateralRaw = parseClarityUint("0x01" + hex.slice(4));
-      } else {
-        collateralRaw = parseClarityUint(hex);
+    // Collateral: find entry where "aid" = zTokenId (assetId+1), extract "amount"
+    const zTokenId = contract.assetId + 1;
+    const hexResult = posRes.result;
+    const aidNameHex = "03" + Buffer.from("aid", "ascii").toString("hex");
+    const aidValueHex = "01" + "00".repeat(15) + zTokenId.toString(16).padStart(2, "0");
+    let collateral = 0;
+    const aidPattern = aidNameHex + aidValueHex;
+    const hexLow = hexResult.replace(/^0x/, "").toLowerCase();
+    const aidIdx = hexLow.indexOf(aidPattern);
+    if (aidIdx >= 0) {
+      const window = hexLow.slice(aidIdx, aidIdx + 200);
+      const amtHex = "06" + Buffer.from("amount", "ascii").toString("hex") + "01";
+      const amtIdx = window.indexOf(amtHex);
+      if (amtIdx >= 0) {
+        const vStart = amtIdx + amtHex.length;
+        const vHex = window.slice(vStart, vStart + 32);
+        if (vHex.length === 32) collateral = parseInt(vHex.slice(16), 16) || 0;
       }
     }
 
-    // Query user's sBTC balance from Hiro for debt estimation
-    // For actual debt, we check if user has borrowed from Zest
-    const balancesUrl = `${HIRO_API}/extended/v1/address/${address}/balances`;
-    const balancesRes = await fetch(balancesUrl, {
-      signal: AbortSignal.timeout(FETCH_TIMEOUT),
-    });
-    let sbtcBalance = 0;
-    if (balancesRes.ok) {
-      const balData: any = await balancesRes.json();
-      const ft = balData?.fungible_tokens;
-      if (ft) {
-        const sbtcKey = Object.keys(ft).find(k => k.includes("sbtc"));
-        if (sbtcKey) sbtcBalance = parseInt(ft[sbtcKey].balance || "0");
-      }
-    }
+    // Debt: find entry where "asset-id" = assetId, extract "actual-debt"
+    const debt = extractDebtForAsset(hexResult, contract.assetId);
 
-    const collateralSats = Math.floor(collateralRaw / (10 ** (contract.decimals - 8) || 1));
-    const collateralValue = collateralRaw;
+    if (collateral === 0 && debt === 0) return null;
 
-    // If no collateral detected, no position exists
-    if (collateralRaw === 0) return null;
-
-    // Estimate debt from reserve data (conservative: assume 60% LTV utilization)
-    // In production, the MCP zest_get_position tool provides exact figures
-    const estimatedDebt = Math.floor(collateralValue * 0.6);
-    const ltv = collateralValue > 0 ? (estimatedDebt / collateralValue) * 100 : 0;
-    const liquidationLtv = 85;
+    const ltv = collateral > 0 ? (debt / collateral) * 100 : 0;
+    const liquidationLtv = contract.liquidationLtv;
     const healthFactor = ltv > 0 ? liquidationLtv / ltv : Infinity;
 
     return {
       asset,
-      collateralShares: collateralRaw,
-      collateralValue,
-      debtValue: estimatedDebt,
+      collateralShares: collateral,
+      collateralValue: collateral,
+      debtValue: debt,
       ltv,
       healthFactor,
       liquidationLtv,
@@ -347,6 +395,7 @@ async function preflight(): Promise<{
   wallet: string | null;
   stxBalance: number;
   sbtcBalance: number;
+  assetBalances: Record<string, number>;
   positions: ZestPosition[];
   errors: string[];
 }> {
@@ -357,23 +406,27 @@ async function preflight(): Promise<{
     errors.push("STACKS_ADDRESS not set — unlock wallet first");
   }
 
-  // Check STX balance for gas
+  // Check STX balance for gas + per-asset balances for reserve checks
   let stxBalance = 0;
   let sbtcBalance = 0;
+  const assetBalances: Record<string, number> = {};
 
   if (wallet) {
     try {
       const balRes = await fetch(
-        `https://api.hiro.so/extended/v1/address/${wallet}/balances`
+        `https://api.hiro.so/extended/v1/address/${wallet}/balances`,
+        { signal: AbortSignal.timeout(FETCH_TIMEOUT) }
       );
       const bal = await balRes.json();
       stxBalance = parseInt(bal.stx?.balance || "0", 10);
-      // Find sBTC balance
-      const sbtcKey = Object.keys(bal.fungible_tokens || {}).find((k) =>
-        k.includes("sbtc-token")
-      );
-      if (sbtcKey) {
-        sbtcBalance = parseInt(bal.fungible_tokens[sbtcKey].balance || "0", 10);
+      const ft: Record<string, { balance: string }> = bal.fungible_tokens || {};
+
+      // Map each Zest asset to its wallet balance for per-asset reserve checks
+      for (const [symbol, cfg] of Object.entries(ZEST_CONTRACTS)) {
+        const tokenKey = Object.keys(ft).find((k) => k.startsWith(cfg.token));
+        const raw = parseInt(ft[tokenKey ?? ""]?.balance || "0", 10);
+        assetBalances[symbol] = raw;
+        if (symbol === "sBTC") sbtcBalance = raw; // backwards compat
       }
     } catch {
       errors.push("Failed to fetch wallet balances from Hiro API");
@@ -402,6 +455,7 @@ async function preflight(): Promise<{
     wallet,
     stxBalance,
     sbtcBalance,
+    assetBalances,
     positions,
     errors,
   };
@@ -465,12 +519,8 @@ program
   .action(async (opts) => {
     const action = opts.action;
     const asset = opts.asset;
-    const targetLtv = Math.max(30, Math.min(75, parseInt(opts.targetLtv, 10)));
-    const maxRepay = Math.min(parseInt(opts.maxRepay, 10), HARD_CAP_PER_REPAY);
-    const interval = Math.max(60, parseInt(opts.interval, 10));
-
-    // Validate target LTV range
-    if (targetLtv < 30 || targetLtv > 75) {
+    const targetLtvRaw = parseInt(opts.targetLtv, 10);
+    if (isNaN(targetLtvRaw) || targetLtvRaw < 30 || targetLtvRaw > 75) {
       fail("Invalid target LTV", {
         code: "invalid_target",
         message: `Target LTV must be 30-75%, got ${opts.targetLtv}%`,
@@ -478,6 +528,9 @@ program
       });
       return;
     }
+    const targetLtv = targetLtvRaw;
+    const maxRepay = Math.min(parseInt(opts.maxRepay, 10), HARD_CAP_PER_REPAY);
+    const interval = Math.max(60, parseInt(opts.interval, 10));
 
     // Validate max repay
     if (maxRepay > HARD_CAP_PER_REPAY) {
@@ -609,9 +662,10 @@ program
       // Compute repayment plan
       const plan = computeRepayPlan(position, targetLtv, effectiveMax);
 
-      // Check wallet reserve
-      if (pf.sbtcBalance - plan.cappedAmount < MIN_WALLET_RESERVE) {
-        const safeAmount = Math.max(0, pf.sbtcBalance - MIN_WALLET_RESERVE);
+      // Check wallet reserve using the balance of the actual repay asset (not always sBTC)
+      const repayAssetBalance = pf.assetBalances[asset] ?? pf.sbtcBalance;
+      if (repayAssetBalance - plan.cappedAmount < MIN_WALLET_RESERVE) {
+        const safeAmount = Math.max(0, repayAssetBalance - MIN_WALLET_RESERVE);
         if (safeAmount <= 0) {
           fail("Cannot repay — would breach wallet reserve", {
             code: "insufficient_balance",
@@ -654,22 +708,22 @@ program
               amount: String(plan.cappedAmount),
             },
           },
+          // After executing mcpCommand, call: record-spend --asset <asset> --amount <sats>
+          // Spend is NOT recorded here — only after on-chain confirmation to prevent
+          // daily cap consumption on failed/rejected transactions.
+          confirmStep: {
+            command: "record-spend",
+            args: `--asset ${plan.asset} --amount ${plan.cappedAmount}`,
+          },
           safetyChecks: {
             withinPerOperationCap: plan.cappedAmount <= HARD_CAP_PER_REPAY,
             withinDailyCap: dailySpend + plan.cappedAmount <= HARD_CAP_PER_DAY,
-            reservePreserved: pf.sbtcBalance - plan.cappedAmount >= MIN_WALLET_RESERVE,
+            reservePreserved: repayAssetBalance - plan.cappedAmount >= MIN_WALLET_RESERVE,
             cooldownRespected: isEmergency || elapsed >= COOLDOWN_SECONDS,
           },
         }
       );
-
-      // Update session state and persist to disk
-      lastRepayTime = Date.now() / 1000;
-      dailySpend += plan.cappedAmount;
-      spendLedger.totalSats = dailySpend;
-      spendLedger.lastRepayEpoch = lastRepayTime;
-      spendLedger.entries.push({ ts: new Date().toISOString(), sats: plan.cappedAmount, asset: plan.asset });
-      saveSpendLedger(spendLedger);
+      // Do NOT update ledger here — agent calls record-spend after tx confirms
       return;
     }
 
@@ -677,6 +731,38 @@ program
       code: "unknown_action",
       message: `Action '${action}' not recognized`,
       next: "Use: status, monitor, repay, or emergency-repay",
+    });
+  });
+
+// --- RECORD-SPEND ---
+// Agent calls this after zest_repay MCP tool confirms success.
+// Spend is recorded here — after on-chain execution — not when the plan is emitted.
+program
+  .command("record-spend")
+  .description("Record a confirmed repayment in the daily spend ledger")
+  .requiredOption("--asset <asset>", "Asset that was repaid")
+  .requiredOption("--amount <sats>", "Amount repaid in base units (sats)")
+  .action((opts) => {
+    const amount = parseInt(opts.amount, 10);
+    if (isNaN(amount) || amount <= 0) {
+      fail("Invalid amount", {
+        code: "invalid_amount",
+        message: `Amount must be a positive integer, got ${opts.amount}`,
+        next: "Pass the cappedAmount from the repay plan",
+      });
+      return;
+    }
+    lastRepayTime = Date.now() / 1000;
+    dailySpend += amount;
+    spendLedger.totalSats = dailySpend;
+    spendLedger.lastRepayEpoch = lastRepayTime;
+    spendLedger.entries.push({ ts: new Date().toISOString(), sats: amount, asset: opts.asset });
+    saveSpendLedger(spendLedger);
+    success("Spend recorded", {
+      asset: opts.asset,
+      amount,
+      dailyTotal: dailySpend,
+      dailyRemaining: HARD_CAP_PER_DAY - dailySpend,
     });
   });
 
