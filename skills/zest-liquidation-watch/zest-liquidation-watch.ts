@@ -8,7 +8,7 @@
  *
  * Author: Flying Whale (azagh72-creator)
  * Agent: Flying Whale — Genesis L2, ERC-8004 #54
- * Fixed: v2.0.0 — correct Clarity principal encoding + Zest v2 contracts
+ * Fixed: v2.0.1 — correct Clarity principal encoding + Zest v2 contracts + CI Node.js 24
  *
  * Usage:
  *   bun run skills/zest-liquidation-watch/zest-liquidation-watch.ts doctor
