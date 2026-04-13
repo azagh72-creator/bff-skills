@@ -8,7 +8,7 @@ metadata:
   arguments: "doctor | check --address <SP...> | scan [--min-risk 0.5] | alert --address <SP...> [--threshold 1.5] --confirm"
   entry: "zest-liquidation-watch/zest-liquidation-watch.ts"
   requires: "network"
-  tags: "defi, read, mainnet-only, l2, monitoring"
+  tags: "defi, read-only, mainnet-only, l2, infrastructure"
 ---
 
 # Zest Liquidation Watch
