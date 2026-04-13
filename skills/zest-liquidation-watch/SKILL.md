@@ -214,3 +214,4 @@ All commands emit a single JSON object to stdout. Exit code is always 0. Parse `
 - Stale oracle prices: health factors use live CoinGecko prices, not Zest's internal Pyth oracle. Values may differ slightly.
 - `scan` discovers addresses from recent market contract events only (last 50). It does not index all historical borrowers.
 - Zest v2 is mainnet-only. There is no testnet equivalent.
+- stSTXbtc price is estimated as `btcPrice × 0.01` (approximate ratio — Bitflow ticker not yet integrated). Health factors for stSTXbtc collateral positions may diverge if the actual ratio differs. Last-verified: 2026-04-13.
